@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# glreview: open a git worktree in VS Code with GitLens comparing its working
+# tree (committed and uncommitted changes) against its merge base with a branch.
+set -euo pipefail
+
+VERSION="0.1.0"
+
+usage() {
+  cat <<'EOF'
+Usage: glreview [options] [path]
+
+Opens the worktree at <path> (default: the current folder) in your editor and
+shows a GitLens Search & Compare of its working tree against the merge base
+with the base branch: every change a merge would bring in, committed or not.
+
+Options:
+  -b, --base <ref>       Branch to compare against (default: main, else master)
+  -e, --editor <name>    code, code-insiders or cursor (default: $GLREVIEW_EDITOR or code)
+  -n, --dry-run          Print the GitLens link instead of opening anything
+  -h, --help             Show this help
+  -v, --version          Show the version
+EOF
+}
+
+die() { echo "glreview: $*" >&2; exit 1; }
+
+# Percent-encodes every byte except unreserved ASCII (works for UTF-8 paths).
+urlencode() {
+  local out="" hex
+  for hex in $(printf '%s' "$1" | od -An -v -tx1); do
+    case "$hex" in
+      2d|2e|5f|7e|3[0-9]|4[1-9a-f]|5[0-9a]|6[1-9a-f]|7[0-9a]) out+=$(printf "\\x$hex") ;;
+      *) out+="%$(printf '%s' "$hex" | tr a-f A-F)" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+base=""
+editor="${GLREVIEW_EDITOR:-code}"
+dry_run=0
+target="."
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -b|--base) [ $# -ge 2 ] || die "$1 needs a value"; base="$2"; shift 2 ;;
+    -e|--editor) [ $# -ge 2 ] || die "$1 needs a value"; editor="$2"; shift 2 ;;
+    -n|--dry-run) dry_run=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -v|--version) echo "glreview $VERSION"; exit 0 ;;
+    -*) die "unknown option: $1 (see --help)" ;;
+    *) target="$1"; shift ;;
+  esac
+done
+
+[ -d "$target" ] || die "not a folder: $target"
+wt=$(git -C "$target" rev-parse --show-toplevel 2>/dev/null) || die "not inside a git worktree: $target"
+
+if [ -z "$base" ]; then
+  for candidate in main master; do
+    if git -C "$wt" rev-parse --verify --quiet "$candidate^{commit}" >/dev/null; then
+      base="$candidate"
+      break
+    fi
+  done
+  [ -n "$base" ] || die "no main or master branch; pass --base <ref>"
+else
+  git -C "$wt" rev-parse --verify --quiet "$base^{commit}" >/dev/null || die "no such branch or ref: $base"
+fi
+
+mb=$(git -C "$wt" merge-base "$base" HEAD 2>/dev/null) || die "no merge base between $base and HEAD"
+
+case "$editor" in
+  code) scheme="vscode" ;;
+  code-insiders) scheme="vscode-insiders" ;;
+  cursor) scheme="cursor" ;;
+  *) die "unknown editor: $editor (code, code-insiders or cursor)" ;;
+esac
+
+# An empty second ref means "working tree" to GitLens; path= picks this exact worktree.
+link="${scheme}://eamodio.gitlens/link/r/-/compare/${mb}...?path=$(urlencode "$wt")"
+
+if [ "$dry_run" -eq 1 ]; then
+  echo "$link"
+  exit 0
+fi
+
+command -v "$editor" >/dev/null || die "'$editor' is not on your PATH (install its shell command first)"
+
+echo "glreview: $wt against $base (merge base ${mb:0:9})"
+"$editor" "$wt"
+
+if command -v open >/dev/null; then
+  open "$link"
+elif command -v xdg-open >/dev/null; then
+  xdg-open "$link" >/dev/null 2>&1
+else
+  die "no 'open' or 'xdg-open' to send the link; run with --dry-run and open it yourself"
+fi
